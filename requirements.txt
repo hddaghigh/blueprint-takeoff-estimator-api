@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+numpy
+pillow
+pdfplumber
+pytest
+pytest-asyncio
+httpx
+requests
+python-multipart

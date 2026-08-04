@@ -1,0 +1,26 @@
+{
+    "walls": {
+        "cwicr_code": "04-2200-0010",
+        "description": "8-inch concrete masonry unit block wall",
+        "unit": "linear_feet",
+        "material_cost_per_unit": 4.50,
+        "labor_hours_per_unit": 0.25,
+        "labor_rate_per_hour": 65.00
+    },
+    "doors": {
+        "cwicr_code": "08-1100-0045",
+        "description": "Standard pre-hung commercial hollow metal door",
+        "unit": "each",
+        "material_cost_per_unit": 450.00,
+        "labor_hours_per_unit": 1.50,
+        "labor_rate_per_hour": 65.00
+    },
+    "flooring": {
+        "cwicr_code": "09-6500-0022",
+        "description": "Commercial resilient vinyl tile flooring",
+        "unit": "square_feet",
+        "material_cost_per_unit": 3.10,
+        "labor_hours_per_unit": 0.08,
+        "labor_rate_per_hour": 55.00
+    }
+}
