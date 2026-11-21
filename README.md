@@ -12,8 +12,14 @@ takeoff into a proposal with material cost, labor cost, and margin.
   - `POST /api/v1/takeoffs/photo` — decodes a real jobsite photo with Pillow,
     computes average luminance to validate the asset, and derives a floor
     area estimate.
-  - `POST /api/v1/takeoffs/drawing-pdf` — scans a real PDF's embedded text
-    and vector geometry with `pdfplumber`.
+  - `POST /api/v1/takeoffs/drawing-pdf` — reads a PDF's text layer with
+    `pdfplumber`, taking walls/doors/flooring quantities from unit-aware text
+    callouts (`1,500 sq ft` flooring, `120 LF` walls, `4` doors). It also
+    reports vector line/curve/rect counts, embedded-image counts and
+    warnings (page cap, scanned/image-only pages, unreadable pages) in
+    `metadata`. Limits: no OCR for scanned drawings, vector lengths are
+    paper-space (no drawing scale applied), and only the first 100 pages are
+    scanned (reported when hit). Corrupt or password-protected files return 422.
 - **One cost engine**, `POST /api/v1/estimates`, that multiplies any takeoff
   against the local `src/database/ddc_cwicr.json` rate table and applies a
   configurable margin (default 15%).

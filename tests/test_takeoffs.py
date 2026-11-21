@@ -65,8 +65,11 @@ async def test_pdf_takeoff_scans_real_pdf_vectors_and_text(client, sample_pdf_pa
     assert response.status_code == 200
     body = response.json()
 
+    # The real asset is a guidebook, not a takeoff set: assert what was actually
+    # read (pages, images, warnings), not fabricated quantities. Detailed
+    # ground-truth PDF checks live in tests/test_pdf_robustness.py.
     assert body["metadata"]["pages_scanned"] > 0
-    assert len(body["items"]) > 0
+    assert body["metadata"]["image_count"] > 0
     for item in body["items"]:
         assert item["quantity"] > 0
         assert item["cwicr_code"]

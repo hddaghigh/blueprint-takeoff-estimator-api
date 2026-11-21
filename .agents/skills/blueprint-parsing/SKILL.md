@@ -18,20 +18,23 @@ pipelines in `src/routes/takeoffs.py` (text, photo, drawing-pdf).
    CWICR row to that file first — do not invent a category string in a router
    that has no matching rate entry.
 
-3. **Text extraction is sentence-scoped regex, not whole-document regex.**
-   `src/extraction.py::extract_quantities_from_text` splits on sentence
-   boundaries and takes the first number in the same sentence as a category
-   keyword. This avoids accidentally pairing a wall count with a door's
-   dimension. Reuse this function from both the text pipeline and the PDF
-   text fallback rather than writing a second regex scanner.
+3. **Text extraction is sentence-scoped and unit-aware.**
+   `src/extraction.py::extract_matches` splits on sentence boundaries and,
+   inside a sentence, pairs each keyword with the nearest number whose unit
+   fits the category (walls = length, flooring = area, doors = count).
+   Dimensions ("8-inch", 3'-0") and part codes ("08-1100-0045") are never
+   quantities. Reuse it from both the text and PDF pipelines rather than
+   writing a second scanner, and add a case to `tests/test_extraction.py`
+   for any new phrasing you support.
 
-4. **PDF pipeline priority order: text first, vector geometry second.**
-   `takeoff_from_pdf` must attempt the keyword+number sentence match across
-   all scanned pages before falling back to vector-geometry heuristics
-   (summed line length for walls, rect count for doors, page area for
-   flooring). Never skip straight to the vector fallback if real text
-   quantities are present — text-embedded dimensions are more reliable than
-   geometric heuristics.
+4. **PDF takeoff items come only from text callouts.** Shape counts and page
+   size have no reliable meaning (rect count != doors, sheet area != floor
+   area), so they must never become takeoff items. Vector lengths/counts and
+   embedded-image counts are reported in `metadata` for reference, as
+   paper-space at 1:1 (864 PDF points = 1 ft; no drawing scale applied).
+   Anything that limits the result (page cap, scanned/image-only pages,
+   skipped pages, no matching callout) must appear in `metadata.warnings`,
+   never be dropped silently. OCR is not supported.
 
 5. **Heuristic constants must be named, documented, and surfaced in
    `metadata`.** The photo pipeline's pixel-to-square-foot calibration
@@ -42,9 +45,10 @@ pipelines in `src/routes/takeoffs.py` (text, photo, drawing-pdf).
    This keeps heuristic estimates from being silently presented as
    ground-truth measurements downstream in the estimate engine.
 
-6. **Large files must not block the event loop.** PDFs are scanned with a
-   hard page cap (`MAX_PDF_PAGES`) to keep the endpoint responsive; if you
-   raise or remove that cap, add a timing regression test.
+6. **Large files must not block the event loop.** PDFs are scanned in a
+   worker thread with a hard page cap (`MAX_PDF_PAGES`, reported in
+   `metadata.warnings` when hit); if you raise or remove that cap, add a
+   timing regression test.
 
 7. **Every pipeline change needs a real-asset test.** Add or update a test in
    `tests/test_takeoffs.py` that uploads the actual file under `assets/`

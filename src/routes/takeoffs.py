@@ -1,16 +1,19 @@
 """Multi-modal takeoff input pipelines: text, photo, and drawing PDF."""
 
+import io
 import math
 from typing import Dict, Optional
 
 import numpy as np
 import pdfplumber
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from pdfminer.pdfdocument import PDFPasswordIncorrect
 from PIL import Image
 
 from src.config import SAMPLE_BLUEPRINT_PDF_PATH, SAMPLE_SITE_PHOTO_PATH, SCOPE_TXT_PATH
 from src.database import get_ddc_cwicr_rates
-from src.extraction import extract_quantities_from_text
+from src.extraction import extract_matches
 from src.schemas import TakeoffItem, TakeoffResponse
 
 router = APIRouter(prefix="/api/v1/takeoffs", tags=["takeoffs"])
@@ -20,11 +23,24 @@ router = APIRouter(prefix="/api/v1/takeoffs", tags=["takeoffs"])
 # metadata is available for an arbitrary uploaded photo.
 PHOTO_PIXELS_PER_SQFT = 500.0
 
-# Only the first N pages of an arbitrary uploaded PDF are scanned, to keep
-# the endpoint responsive for large documents.
-MAX_PDF_PAGES = 15
+# Hard page cap so one huge PDF cannot tie up a worker. Hitting it is never
+# silent: the response carries a warning with pages_total / pages_scanned.
+MAX_PDF_PAGES = 100
 
-POINTS_PER_FOOT = 72.0 / 12.0  # 72 points per inch, 12 inches per foot
+POINTS_PER_INCH = 72.0  # PDF user-space unit
+POINTS_PER_FOOT = POINTS_PER_INCH * 12.0  # 864 points per foot
+
+
+def _decode_text(raw: bytes) -> str:
+    """Decode an uploaded text file; reject binary uploads with a 422, not a 500."""
+    if b"\x00" in raw:
+        raise HTTPException(
+            status_code=422, detail="Upload is a binary file, not a text file"
+        )
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")  # legacy Windows text
 
 
 def _build_items(quantities: Dict[str, float]) -> list[TakeoffItem]:
@@ -57,7 +73,6 @@ async def takeoff_from_text(
     """
     if file is not None:
         raw = await file.read()
-        text = raw.decode("utf-8")
         source = file.filename or "uploaded_text"
     else:
         if not SCOPE_TXT_PATH.exists():
@@ -65,19 +80,23 @@ async def takeoff_from_text(
                 status_code=404,
                 detail="assets/scope.txt not found; run bootstrap_assets.py",
             )
-        text = SCOPE_TXT_PATH.read_text(encoding="utf-8")
+        raw = SCOPE_TXT_PATH.read_bytes()
         source = str(SCOPE_TXT_PATH)
 
-    quantities = extract_quantities_from_text(text)
-    if not quantities:
+    text = _decode_text(raw)
+    matches = extract_matches(text)
+    if not matches:
         raise HTTPException(
             status_code=422, detail="No walls/doors/flooring quantities found in text"
         )
 
     return TakeoffResponse(
         source=source,
-        items=_build_items(quantities),
-        metadata={"characters_scanned": len(text)},
+        items=_build_items({c: m.quantity for c, m in matches.items()}),
+        metadata={
+            "characters_scanned": len(text),
+            "evidence": {c: m.snippet for c, m in matches.items()},
+        },
     )
 
 
@@ -137,12 +156,13 @@ async def takeoff_from_photo(
 async def takeoff_from_pdf(
     file: Optional[UploadFile] = File(default=None),
 ) -> TakeoffResponse:
-    """Scan a real PDF's embedded text and vector geometry with pdfplumber.
+    """Scan a PDF's text layer, vector geometry and embedded images.
 
-    Text-based keyword+number pairs (as in the text pipeline) take priority.
-    Any category not found in the text falls back to a quantity derived from
-    real vector geometry scanned off the page: summed line lengths for
-    walls, rect counts for doors, and summed page area for flooring.
+    Takeoff items come only from unit-aware text callouts (never from page
+    size or shape counts, which have no reliable meaning). Vector and image
+    statistics, and any problem hit while reading (page cap, scanned pages,
+    unreadable pages), are reported in `metadata`. Unreadable, corrupt or
+    password-protected files return 422.
     """
     if file is not None:
         raw = await file.read()
@@ -156,55 +176,107 @@ async def takeoff_from_pdf(
         raw = SAMPLE_BLUEPRINT_PDF_PATH.read_bytes()
         source = str(SAMPLE_BLUEPRINT_PDF_PATH)
 
-    import io
+    matches, metadata = await run_in_threadpool(_scan_pdf, raw)
+    return TakeoffResponse(
+        source=source,
+        items=_build_items({c: m.quantity for c, m in matches.items()}),
+        metadata=metadata,
+    )
 
+
+def _path_length(points) -> float:
+    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:]))
+
+
+def _scan_pdf(raw: bytes):
+    """Blocking PDF scan (run in a worker thread). Returns (matches, metadata)."""
     try:
         pdf = pdfplumber.open(io.BytesIO(raw))
     except Exception as exc:
+        reason = exc.args[0] if exc.args else exc
+        if isinstance(reason, PDFPasswordIncorrect):
+            raise HTTPException(
+                status_code=422,
+                detail="PDF is password-protected; unlock it and re-upload",
+            )
         raise HTTPException(status_code=422, detail=f"Not a valid PDF file: {exc}")
 
-    text_chunks = []
-    total_line_length_pt = 0.0
-    total_rects = 0
-    total_page_area_pt2 = 0.0
-    pages_scanned = 0
+    warnings = []
+    texts = []
+    failed_pages = []
+    image_count = line_count = curve_count = rect_count = 0
+    path_length_pt = 0.0
+    pages_with_text = pages_image_only = pages_scanned = 0
 
     with pdf:
-        for page in pdf.pages[:MAX_PDF_PAGES]:
+        pages_total = len(pdf.pages)
+        if pages_total == 0:
+            warnings.append("PDF has no pages")
+        if pages_total > MAX_PDF_PAGES:
+            warnings.append(
+                f"Only the first {MAX_PDF_PAGES} of {pages_total} pages were scanned; "
+                "quantities on later pages are not included"
+            )
+        for number, page in enumerate(pdf.pages[:MAX_PDF_PAGES], start=1):
+            try:
+                text = (page.extract_text() or "").strip()
+                images = len(page.images)
+                lines, curves, rects = page.lines, page.curves, page.rects
+                length = sum(
+                    math.hypot(ln["x1"] - ln["x0"], ln["y1"] - ln["y0"]) for ln in lines
+                ) + sum(_path_length(c["pts"]) for c in curves)
+            except Exception:
+                failed_pages.append(number)
+                continue
             pages_scanned += 1
-            page_text = page.extract_text() or ""
-            text_chunks.append(page_text)
+            texts.append(text)
+            pages_with_text += bool(text)
+            pages_image_only += bool(images and not text)
+            image_count += images
+            line_count += len(lines)
+            curve_count += len(curves)
+            rect_count += len(rects)
+            path_length_pt += length
 
-            for line in page.lines:
-                dx = line["x1"] - line["x0"]
-                dy = line["y1"] - line["y0"]
-                total_line_length_pt += math.hypot(dx, dy)
-
-            total_rects += len(page.rects)
-            total_page_area_pt2 += page.width * page.height
-
-    combined_text = "\n".join(text_chunks)
-    quantities = extract_quantities_from_text(combined_text)
-
-    if "walls" not in quantities and total_line_length_pt > 0:
-        quantities["walls"] = total_line_length_pt / POINTS_PER_FOOT
-    if "doors" not in quantities and total_rects > 0:
-        quantities["doors"] = float(total_rects)
-    if "flooring" not in quantities and total_page_area_pt2 > 0:
-        quantities["flooring"] = total_page_area_pt2 / (POINTS_PER_FOOT**2)
-
-    if not quantities:
-        raise HTTPException(
-            status_code=422,
-            detail="No extractable text or vector geometry found in PDF",
+    if failed_pages:
+        warnings.append(f"Could not parse page(s) {failed_pages}; they were skipped")
+    if pages_scanned and pages_with_text == 0:
+        warnings.append(
+            "No text layer found"
+            + (
+                f"; the PDF looks like scanned images ({image_count} embedded). "
+                "OCR is not supported, so no quantities could be read"
+                if image_count
+                else " (vector-only drawing with no text callouts)"
+            )
+        )
+    elif pages_image_only:
+        warnings.append(
+            f"{pages_image_only} page(s) hold images but no text (likely scanned) "
+            "and were not read"
         )
 
-    return TakeoffResponse(
-        source=source,
-        items=_build_items(quantities),
-        metadata={
-            "pages_scanned": pages_scanned,
-            "vector_line_length_ft": round(total_line_length_pt / POINTS_PER_FOOT, 2),
-            "vector_rect_count": total_rects,
-        },
-    )
+    matches = extract_matches("\n\n".join(texts))
+    if pages_with_text and not matches:
+        warnings.append(
+            "No walls/doors/flooring quantity with a compatible unit found in the text"
+        )
+
+    metadata = {
+        "pages_total": pages_total,
+        "pages_scanned": pages_scanned,
+        "pages_with_text": pages_with_text,
+        "image_count": image_count,
+        "vector_line_count": line_count,
+        "vector_curve_count": curve_count,
+        "vector_rect_count": rect_count,
+        "vector_path_length_ft_paper_space": round(path_length_pt / POINTS_PER_FOOT, 2),
+        "evidence": {c: m.snippet for c, m in matches.items()},
+        "warnings": warnings,
+        "note": (
+            "Takeoff items come only from text callouts. Vector/image figures are "
+            "reported for reference: lengths are paper-space (1:1, no drawing scale "
+            "applied) and curve lengths are approximated by their control points."
+        ),
+    }
+    return matches, metadata

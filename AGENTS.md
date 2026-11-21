@@ -8,8 +8,8 @@ python -m venv .venv
 .venv/Scripts/activate        # Windows
 # source .venv/bin/activate   # macOS/Linux
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Install dependencies (dev file adds reportlab for test PDFs, and black)
+pip install -r requirements-dev.txt
 
 # 3. Fetch real assets (scope.txt, sample_blueprint.pdf, sample_site_photo.jpg)
 python bootstrap_assets.py

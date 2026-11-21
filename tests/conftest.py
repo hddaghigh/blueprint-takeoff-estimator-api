@@ -37,3 +37,24 @@ def sample_pdf_path():
         SAMPLE_BLUEPRINT_PDF_PATH.exists()
     ), "run bootstrap_assets.py before the test suite"
     return SAMPLE_BLUEPRINT_PDF_PATH
+
+
+@pytest.fixture
+def make_pdf(tmp_path):
+    """Write a real PDF with known ground-truth content and return its path.
+
+    `draw(canvas, page_index)` paints one page with the reportlab canvas API
+    (requirements-dev.txt). The file is uploaded via a normal file handle.
+    """
+    from reportlab.pdfgen import canvas
+
+    def _make(draw, name="doc.pdf", pages=1, **canvas_kwargs):
+        path = tmp_path / name
+        pdf = canvas.Canvas(str(path), **canvas_kwargs)
+        for index in range(pages):
+            draw(pdf, index)
+            pdf.showPage()
+        pdf.save()
+        return path
+
+    return _make
