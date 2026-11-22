@@ -11,7 +11,9 @@ import json
 import math
 import os
 import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -40,10 +42,34 @@ FLATTEN_DISTANCE = 0.01  # drawing units; curve segmentation tolerance
 DOOR_SWING_SWEEP_DEG = (80.0, 100.0)
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
+def _load_rules(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            rules = {k: v for k, v in json.load(fh).items() if not k.startswith("_")}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Cannot read layer rules file '{path}': {exc}"
+        )
+    for category, needs in (("walls", ()), ("doors", ("blocks",)), ("flooring", ())):
+        rule = rules.get(category)
+        if not isinstance(rule, dict) or not isinstance(rule.get("layers"), list):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Layer rules file '{path}': '{category}' needs a 'layers' list",
+            )
+        for key in needs:
+            if not isinstance(rule.get(key), list):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Layer rules file '{path}': '{category}' needs a '{key}' list",
+                )
+    return rules
+
+
 def layer_rules() -> dict:
-    with open(LAYER_RULES_PATH, "r", encoding="utf-8") as fh:
-        return {k: v for k, v in json.load(fh).items() if not k.startswith("_")}
+    """Layer/block name rules. Set LAYER_RULES_FILE to use your office CAD standard."""
+    return _load_rules(os.environ.get("LAYER_RULES_FILE") or str(LAYER_RULES_PATH))
 
 
 def _matches(
@@ -55,40 +81,107 @@ def _matches(
     return any(fnmatch.fnmatchcase(upper, p.upper()) for p in patterns)
 
 
-def _convert_dwg(raw: bytes) -> bytes:
-    """DWG -> DXF through an operator-configured converter, else a clear 422.
+CONVERT_TIMEOUT_S = 120
+DWG_INSTALL_HELP = (
+    "Export to DXF from your CAD tool (most reliable), or install a converter on "
+    "the server: the ODA File Converter (free, proprietary; used through ezdxf), "
+    "or LibreDWG's `dwg2dxf` (GPLv3; run as a separate program). You can also set "
+    "DWG_CONVERTER_CMD, e.g. 'dwg2dxf -y -o {output} {input}'."
+)
 
-    Set DWG_CONVERTER_CMD to a command template using {input} and {output},
-    e.g. `dwg2dxf -y -o {output} {input}`. It is run without a shell.
+
+def _run_template(template: str, src: Path, dst: Path) -> None:
+    # posix=False keeps Windows backslashes intact but also keeps the quote
+    # characters, so strip one surrounding pair from each token.
+    tokens = [
+        t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
+        for t in shlex.split(template, posix=os.name != "nt")
+    ]
+    args = [
+        t.replace("{input}", str(src)).replace("{output}", str(dst)) for t in tokens
+    ]
+    subprocess.run(args, check=True, capture_output=True, timeout=CONVERT_TIMEOUT_S)
+
+
+def _run_oda(src: Path, dst: Path) -> None:
+    """ODA File Converter through ezdxf's odafc addon, in a child process so a
+    hang on a hostile file is cut off by a hard timeout."""
+    code = (
+        "import sys; from ezdxf.addons import odafc; "
+        "odafc.convert(sys.argv[1], sys.argv[2], version='R2018', audit=False, replace=True)"
+    )
+    subprocess.run(
+        [sys.executable, "-c", code, str(src), str(dst)],
+        check=True,
+        capture_output=True,
+        timeout=CONVERT_TIMEOUT_S,
+    )
+
+
+def _run_libredwg(src: Path, dst: Path) -> None:
+    """LibreDWG's dwg2dxf as a separate program (never imported: GPLv3)."""
+    exe = shutil.which("dwg2dxf")
+    subprocess.run(
+        [exe, "-y", "-o", str(dst), str(src)],
+        check=True,
+        capture_output=True,
+        timeout=CONVERT_TIMEOUT_S,
+    )
+
+
+def _oda_installed() -> bool:
+    try:
+        from ezdxf.addons import odafc
+
+        return bool(odafc.is_installed())
+    except Exception:
+        return False
+
+
+def dwg_converters() -> List[tuple]:
+    """Available DWG->DXF converters as (name, runner), best first.
+
+    An operator-set DWG_CONVERTER_CMD wins; then the ODA File Converter (best
+    support for current DWG versions); then LibreDWG's dwg2dxf.
     """
+    found = []
     template = os.environ.get("DWG_CONVERTER_CMD")
-    if not template:
+    if template:
+        found.append(
+            ("DWG_CONVERTER_CMD", lambda s, d, t=template: _run_template(t, s, d))
+        )
+    if _oda_installed():
+        found.append(("odafc", _run_oda))
+    if shutil.which("dwg2dxf"):
+        found.append(("libredwg", _run_libredwg))
+    return found
+
+
+def _convert_dwg(raw: bytes) -> bytes:
+    """DWG -> DXF using the first converter that works, else a clear 422."""
+    converters = dwg_converters()
+    if not converters:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "DWG files are not read directly. Export to DXF from your CAD tool, or "
-                "set DWG_CONVERTER_CMD (e.g. 'dwg2dxf -y -o {output} {input}') on the server."
-            ),
+            detail="DWG files are not read directly. " + DWG_INSTALL_HELP,
         )
+    errors = []
     with tempfile.TemporaryDirectory() as tmp:
-        src, dst = Path(tmp) / "in.dwg", Path(tmp) / "out.dxf"
+        src = Path(tmp) / "in.dwg"
         src.write_bytes(raw)
-        # posix=False keeps Windows backslashes intact but also keeps the quote
-        # characters, so strip one surrounding pair from each token.
-        tokens = [
-            t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
-            for t in shlex.split(template, posix=os.name != "nt")
-        ]
-        args = [
-            t.replace("{input}", str(src)).replace("{output}", str(dst)) for t in tokens
-        ]
-        try:
-            subprocess.run(args, check=True, capture_output=True, timeout=120)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise HTTPException(status_code=422, detail=f"DWG conversion failed: {exc}")
-        if not dst.exists():
-            raise HTTPException(status_code=422, detail="DWG converter produced no DXF")
-        return dst.read_bytes()
+        for index, (name, run) in enumerate(converters):
+            dst = Path(tmp) / f"out{index}.dxf"
+            try:
+                run(src, dst)
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"{name}: {type(exc).__name__}")
+                continue
+            if dst.exists() and dst.stat().st_size > 0:
+                return dst.read_bytes()
+            errors.append(f"{name}: produced no DXF")
+    raise HTTPException(
+        status_code=422, detail="DWG conversion failed (" + "; ".join(errors) + ")"
+    )
 
 
 def _read_document(raw: bytes):
@@ -107,9 +200,10 @@ def _read_document(raw: bytes):
                 raise HTTPException(
                     status_code=422, detail=f"Not a readable DXF file: {exc}"
                 )
-        except (ezdxf.DXFError, OSError, UnicodeDecodeError) as exc:
+        except Exception as exc:  # incl. StopIteration/IndexError on truncated files
             raise HTTPException(
-                status_code=422, detail=f"Not a readable DXF file: {exc}"
+                status_code=422,
+                detail=f"Not a readable DXF file: {type(exc).__name__}: {exc}",
             )
 
 
@@ -147,6 +241,119 @@ def _length(vertices: List[tuple], closed: bool = False) -> float:
     return total
 
 
+MAX_BLOCK_DEPTH = 8
+MAX_EXPANDED_INSERTS = 5000  # guards against pathological block nesting / huge arrays
+TEXT_KINDS = ("TEXT", "MTEXT")
+WALL_PATH_KINDS = ("LWPOLYLINE", "POLYLINE", "ARC", "SPLINE", "ELLIPSE")
+
+
+class _WalkStats:
+    def __init__(self):
+        self.hidden = 0
+        self.expanded = 0
+        self.too_deep = 0
+        self.cap_hit = False
+        self.xrefs: set = set()
+        self.unsupported: Dict[str, int] = {}
+        self._layer_state: Dict[str, bool] = {}
+
+    def layer_hidden(self, doc, name: str) -> bool:
+        if name not in self._layer_state:
+            try:
+                layer = doc.layers.get(name)
+                self._layer_state[name] = bool(layer.is_off() or layer.is_frozen())
+            except Exception:  # unknown layer name: treat as visible
+                self._layer_state[name] = False
+        return self._layer_state[name]
+
+
+def _is_door_insert(name: str, layer: str, rule: dict) -> bool:
+    if _matches(layer, rule["layers"], rule.get("exclude_layers")):
+        return True
+    return not name.startswith("*") and _matches(name, rule["blocks"])
+
+
+def _is_xref(doc, name: str) -> bool:
+    try:
+        return bool(doc.blocks.get(name).block.dxf.get("xref_path"))
+    except Exception:
+        return False
+
+
+def _walk(entities, doc, stats, rule, depth=0, parent_layer=None, stack=()):
+    """Yield (kind, entity, effective_layer, count) for every drawable entity.
+
+    Nested blocks are expanded (with their scale/rotation applied) and block
+    arrays are counted per cell. A door block is a single unit: it is yielded as
+    "DOOR_BLOCK" with its cell count and not expanded. Entities on layer "0"
+    inside a block take the layer of the INSERT, as CAD software does.
+    """
+    for e in entities:
+        kind = e.dxftype()
+        layer = e.dxf.layer
+        if layer == "0" and parent_layer:
+            layer = parent_layer
+        if stats.layer_hidden(doc, layer) or e.dxf.get("invisible", 0):
+            stats.hidden += 1
+            continue
+        if kind != "INSERT":
+            yield kind, e, layer, 1
+            continue
+        name = e.dxf.name
+        cells = max(1, e.dxf.get("column_count", 1)) * max(1, e.dxf.get("row_count", 1))
+        if _is_door_insert(name, layer, rule):
+            yield "DOOR_BLOCK", e, layer, cells
+            continue
+        if _is_xref(doc, name):
+            stats.xrefs.add(name)
+            continue
+        if depth >= MAX_BLOCK_DEPTH or name in stack:
+            stats.too_deep += 1
+            continue
+        if stats.expanded + cells > MAX_EXPANDED_INSERTS:
+            stats.cap_hit = True
+            continue
+        stats.expanded += cells
+        for cell in e.multi_insert():
+            yield from _walk(
+                cell.virtual_entities(),
+                doc,
+                stats,
+                rule,
+                depth + 1,
+                layer,
+                stack + (name,),
+            )
+
+
+def _paper_layouts(doc) -> List[dict]:
+    """Paper-space layouts that hold viewports, with each viewport's scale."""
+    out = []
+    for name in doc.layout_names():
+        if name == "Model":
+            continue
+        try:
+            viewports = [
+                vp
+                for vp in doc.layout(name).viewports()
+                if vp.dxf.get("status", 1) > 0 or vp.dxf.get("view_height", 0)
+            ]
+        except Exception:
+            continue
+        if viewports:
+            scales = sorted(
+                {
+                    round(vp.dxf.height / vp.dxf.view_height, 4)
+                    for vp in viewports
+                    if vp.dxf.get("view_height", 0)
+                }
+            )
+            out.append(
+                {"name": name, "viewports": len(viewports), "paper_per_model": scales}
+            )
+    return out
+
+
 def process_cad(
     raw: bytes,
     source: str,
@@ -158,9 +365,9 @@ def process_cad(
             status_code=422,
             detail="wall_representation must be 'centerline' or 'double_line'",
         )
+    rules = layer_rules()  # fail fast on a bad rules file
     doc = _read_document(raw)
     ft = _feet_per_unit(doc, units)
-    rules = layer_rules()
     msp = doc.modelspace()
     warnings: List[str] = []
     counts = {"wall_entities": 0, "door_blocks": 0, "door_arcs": 0, "floor_shapes": 0}
@@ -176,30 +383,29 @@ def process_cad(
     layers_seen = set()
 
     wr, dr, fr = rules["walls"], rules["doors"], rules["flooring"]
-    for e in msp:
-        kind, layer = e.dxftype(), e.dxf.layer
+    stats = _WalkStats()
+    for kind, e, layer, cells in _walk(msp, doc, stats, dr):
         layers_seen.add(layer)
         try:
-            if kind in ("TEXT", "MTEXT"):
+            if kind in TEXT_KINDS:
                 notes.append(e.dxf.text if kind == "TEXT" else e.plain_text())
-            elif kind == "INSERT":
-                if _matches(layer, dr["layers"], dr.get("exclude_layers")) or _matches(
-                    e.dxf.name, dr["blocks"]
-                ):
-                    door_blocks += 1
+            elif kind == "DOOR_BLOCK":
+                door_blocks += cells
             elif _matches(layer, wr["layers"], wr.get("exclude_layers")):
                 if kind == "LINE":
                     a, b = e.dxf.start, e.dxf.end
                     wall_segments.append((a.x, a.y, b.x, b.y))
                     wall_length_units += math.dist((a.x, a.y), (b.x, b.y))
                     counts["wall_entities"] += 1
-                elif kind in ("LWPOLYLINE", "POLYLINE", "ARC"):
+                elif kind == "MLINE":
+                    stats.unsupported["MLINE"] = stats.unsupported.get("MLINE", 0) + 1
+                elif kind in WALL_PATH_KINDS:
                     v = _vertices(e)
                     if kind == "LWPOLYLINE":
                         straight = all(p[4] == 0 for p in e.get_points("xyseb"))
                     elif kind == "POLYLINE":
                         straight = all(vtx.dxf.bulge == 0 for vtx in e.vertices)
-                    else:  # ARC
+                    else:  # ARC, SPLINE, ELLIPSE
                         straight = False
                     closed = bool(
                         getattr(e, "is_closed", False) or getattr(e, "closed", False)
@@ -235,6 +441,38 @@ def process_cad(
             warnings.append(f"Skipped an unreadable {kind} entity on layer '{layer}'")
 
     counts["door_blocks"], counts["door_arcs"] = door_blocks, door_arcs
+
+    review: List[str] = []
+    if stats.hidden:
+        warnings.append(
+            f"{stats.hidden} entit(ies) on frozen/off layers or marked invisible were ignored"
+        )
+    if stats.xrefs:
+        warnings.append(
+            f"External reference(s) {sorted(stats.xrefs)} are not loaded; geometry in them "
+            "is not counted"
+        )
+        review.append("xrefs not loaded")
+    if stats.too_deep:
+        warnings.append(
+            f"{stats.too_deep} block(s) nested deeper than {MAX_BLOCK_DEPTH} levels or "
+            "referencing themselves were not expanded"
+        )
+        review.append("block nesting limit")
+    if stats.cap_hit:
+        warnings.append(
+            f"More than {MAX_EXPANDED_INSERTS} block insertions; the rest were not expanded"
+        )
+        review.append("insert cap reached")
+    for kind, n in stats.unsupported.items():
+        warnings.append(f"{n} {kind} entit(ies) on wall layers are not measured")
+        review.append(f"{kind} not measured")
+    paper = _paper_layouts(doc)
+    if paper:
+        warnings.append(
+            "Read model space only; paper-space layout(s) with viewports exist "
+            f"({[p['name'] for p in paper]}), so printed scales were not applied"
+        )
 
     findings: Dict[str, Finding] = {}
     if counts["wall_entities"]:
@@ -302,8 +540,11 @@ def process_cad(
             "No entities matched the wall/door/flooring layer rules "
             f"(src/database/layer_rules.json). Layers present: {sorted(layers_seen)[:20]}"
         )
-    review = [w for w in warnings if "differs" in w or "Skipped" in w]
+    review += [w for w in warnings if "differs" in w or "Skipped" in w]
     metadata = {
+        "paper_layouts": paper,
+        "hidden_entities_ignored": stats.hidden,
+        "blocks_expanded": stats.expanded,
         "units": dxf_units.decode(doc.units) if not units else units,
         "feet_per_unit": round(ft, 6),
         "wall_representation": wall_representation,

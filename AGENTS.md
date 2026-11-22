@@ -51,7 +51,7 @@ src/
   extraction.py    Unit-aware text quantity extraction (shared by every pipeline)
   pipelines.py     process_text/photo/pdf, detect_kind, run_takeoff, upload limit
   pdf_scan.py      PDF service: text layer, OCR, scale, geometry, schedules, vision
-  cad.py           DXF/DWG takeoff (layers, blocks, units)
+  cad.py           DXF/DWG takeoff: layers, nested blocks/arrays, units, converter selection
   jobs.py          In-memory background jobs
   measure/         dimensions.py (feet-inches, metric), scale.py (drawing scale)
   geometry/        paths.py (exact Bezier/polygon math), semantics.py, schedules.py
@@ -59,7 +59,8 @@ src/
                    full page + bands, merge, orientation), normalize.py (spacing
                    repair), preprocess.py (deskew/binarize), rasterize.py
   vision/          claude.py (opt-in Anthropic vision)
-  database/        ddc_cwicr.json (rates), layer_rules.json (CAD), loader.py
+  database/        ddc_cwicr.json (rates), layer_rules.json (CAD, LAYER_RULES_FILE), loader.py
+examples/          layer_rules.german.example.json
   routes/          takeoffs.py, estimates.py, jobs.py
 tests/             pytest + httpx.AsyncClient, ground-truth PDFs/DXFs
 scripts/           benchmark.py

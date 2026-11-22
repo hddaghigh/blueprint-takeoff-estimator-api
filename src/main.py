@@ -4,7 +4,7 @@ import os
 
 from fastapi import FastAPI
 
-from src import config
+from src import cad, config
 from src.ocr import engine as ocr_engine
 from src.routes import estimates, jobs, takeoffs
 
@@ -41,7 +41,8 @@ async def health() -> dict:
             ),
             "model": os.environ.get("VISION_MODEL", "claude-sonnet-5-5"),
         },
-        "dwg_converter": bool(os.environ.get("DWG_CONVERTER_CMD")),
+        "dwg_converter": bool(cad.dwg_converters()),
+        "dwg_converters": [name for name, _ in cad.dwg_converters()],
         "limits": {
             "max_upload_mb": config.MAX_UPLOAD_MB,
             "max_pdf_pages": config.MAX_PDF_PAGES,

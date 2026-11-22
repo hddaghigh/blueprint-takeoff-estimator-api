@@ -15,11 +15,23 @@ anything that limits a result is reported instead of hidden.
 | Drawing scale (`1/4" = 1'-0"`, `1:50`), real-unit lengths | Yes, from an explicit note on the same page |
 | Double-line walls, door-swing arcs, room areas from vectors | Yes, heuristic: needs a scale; medium/low confidence |
 | Dimension strings found in text | Yes, reported in `metadata.dimensions` |
-| DXF drawings: walls, door blocks, floor areas, units | Yes: from layers and blocks (`src/database/layer_rules.json`) |
-| DWG | Only through a converter you configure (`DWG_CONVERTER_CMD`) |
+| DXF drawings: walls, door blocks, floor areas, units | Yes: from layers and blocks (`src/database/layer_rules.json`, tunable with `LAYER_RULES_FILE`). Expands nested blocks and block arrays, skips frozen/off layers, measures splines and ellipses |
+| DWG | Via a converter, tried in order: `DWG_CONVERTER_CMD`, the ODA File Converter (through ezdxf), LibreDWG `dwg2dxf`. Exporting DXF from your CAD tool is the most reliable route |
 | OCR of scanned PDFs / photos | Yes: RapidOCR (pip, no system install) by default, Tesseract optional. Handles skewed and sideways pages |
 | Reading drawing *images* (symbols, hand notes, photos) | Optional Claude vision, opt-in per request, always low confidence |
 | Pricing | Yes: waste, regional index, overhead/profit/contingency/tax, unit checks |
+
+**CAD notes.** DXF is Autodesk's published format (not open source, and it also
+exists as binary); ezdxf (MIT) reads both. DWG is proprietary: the ODA File
+Converter is free to download but not open source and restricts redistribution;
+LibreDWG is GPLv3 with incomplete support for newer DWG versions, so it is only
+ever run as a separate program, never imported. The converter runs in a child
+process with a 120 s timeout. DWG conversion has only been exercised with
+stand-in converters in tests, not with a real ODA/LibreDWG install. CAD reading
+covers model space only (paper-space layouts and their viewport scales are
+reported, not applied), does not load external references, and does not measure
+MLINE entities; each is listed in `metadata.warnings`. Layer-name matching
+depends on your CAD standard: check `metadata.layers_present`.
 
 Honest limits: OCR and vision are never 100%, so `needs_review` flags everything
 a person should verify. Geometry heuristics (walls, doors, rooms) are guesses
@@ -151,7 +163,8 @@ geometry > vision; CAD geometry > drawing notes. Disagreements are flagged.
 | `OCR_ENGINE` | `auto` | `auto` (RapidOCR, else Tesseract) / `rapidocr` / `tesseract` / `none` |
 | `TESSERACT_CMD` | auto | Tesseract binary path |
 | `ANTHROPIC_API_KEY`, `VISION_MODEL` | none, `claude-sonnet-5-5` | Enable vision. Sends the image to Anthropic, only when a request sets `use_vision=true` |
-| `DWG_CONVERTER_CMD` | none | e.g. `dwg2dxf -y -o {output} {input}` (run without a shell) |
+| `DWG_CONVERTER_CMD` | none | e.g. `dwg2dxf -y -o {output} {input}` (run without a shell). Wins over auto-detected converters |
+| `LAYER_RULES_FILE` | built-in | Your CAD standard's layer/block name patterns; see `examples/layer_rules.german.example.json` |
 
 ## Testing
 

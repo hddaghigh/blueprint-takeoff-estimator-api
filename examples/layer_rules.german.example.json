@@ -1,0 +1,16 @@
+{
+    "_comment": "Example of tuning the CAD layer rules to another office standard (German layer names). Copy, edit, and point LAYER_RULES_FILE at it. Patterns are case-insensitive fnmatch globs; 'exclude_layers' win over 'layers'; door 'blocks' match block names. Default rules (src/database/layer_rules.json) already cover AIA/NCS names such as A-WALL, A-DOOR, A-FLOR.",
+    "walls": {
+        "layers": ["*WAND*", "*WALL*"],
+        "exclude_layers": ["*BEM*", "*MASS*", "*TEXT*", "*SCHRAFF*"]
+    },
+    "doors": {
+        "layers": ["*TUER*", "*TÜR*", "*DOOR*"],
+        "exclude_layers": ["*BEM*", "*MASS*", "*TEXT*"],
+        "blocks": ["TUER*", "TÜR*", "*DOOR*"]
+    },
+    "flooring": {
+        "layers": ["*BODEN*", "*FLOOR*", "*FLOR*"],
+        "exclude_layers": ["*BEM*", "*MASS*", "*TEXT*", "*SCHRAFF*"]
+    }
+}

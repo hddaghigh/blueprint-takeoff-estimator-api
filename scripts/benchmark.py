@@ -119,6 +119,31 @@ def cad_full(doc, msp):
     )
 
 
+def cad_nested(doc, msp):
+    """A 10 ft wall + door block, nested in a block, inserted as a 2x2 array."""
+    doc.blocks.new("DOOR-36")
+    room = doc.blocks.new("ROOM")
+    room.add_line((0, 0), (10, 0), dxfattribs={"layer": "0"})
+    room.add_blockref("DOOR-36", (1, 0))
+    msp.add_blockref(
+        "ROOM",
+        (0, 0),
+        dxfattribs={
+            "layer": "A-WALL",
+            "column_count": 2,
+            "row_count": 2,
+            "column_spacing": 20,
+            "row_spacing": 20,
+        },
+    )
+
+
+def cad_hidden(doc, msp):
+    doc.layers.add("OLD-WALL").freeze()
+    msp.add_line((0, 0), (10, 0), dxfattribs={"layer": "A-WALL"})
+    msp.add_line((0, 5), (500, 5), dxfattribs={"layer": "OLD-WALL"})
+
+
 CASES: List[Tuple[str, Callable[[], Dict[str, float]], Dict[str, float]]] = [
     (
         "text: scope",
@@ -182,6 +207,16 @@ CASES: List[Tuple[str, Callable[[], Dict[str, float]], Dict[str, float]]] = [
                 units.MM,
             )
         ),
+        {"walls": 10},
+    ),
+    (
+        "dxf: nested blocks + arrays",
+        cad_case(dxf(cad_nested)),
+        {"walls": 40, "doors": 4},
+    ),
+    (
+        "dxf: frozen layer ignored",
+        cad_case(dxf(cad_hidden)),
         {"walls": 10},
     ),
 ]

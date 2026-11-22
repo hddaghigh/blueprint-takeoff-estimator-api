@@ -69,3 +69,10 @@ Rules for any agent that reads, extends, or debugs the takeoff pipelines
     `multipart/form-data`. Replace OCR/Claude only at their own boundary
     (`ocr.engine.set_engine`, `vision.claude.set_client`). After adding logic,
     mutate one constant and confirm a test fails. Run `python -m scripts.benchmark`.
+
+11. **CAD (`src/cad.py`).** expand nested blocks with their scale, count block
+    arrays per cell, treat a door block as one unit (never expand it), let layer-0
+    entities inherit the INSERT's layer, skip frozen/off/invisible entities, and
+    report (never silently drop) xrefs, MLINE, paper-space viewports, depth/insert
+    caps. DWG is converted by a child process with a timeout; never import
+    LibreDWG (GPLv3).
