@@ -1,9 +1,9 @@
 # Blueprint Takeoff Estimator API
 
-**Turn construction documents into an auditable quantity takeoff and a priced estimate.**
+**A multi-modal FastAPI service that turns construction documents into an auditable quantity takeoff and a priced estimate.**
 
 Upload scope text, a PDF drawing, a scanned sheet, a jobsite photo, or a DXF/DWG
-file. The API reads it, extracts walls, doors and flooring, and prices them. Every
+file. The API reads it (text, images and vector geometry through one pipeline), extracts walls, doors and flooring, and prices them. Every
 number says **where it came from** (`basis`), **how far to trust it**
 (`confidence`) and **the evidence**, and anything that limits a result (a scanned
 page it could not read, an unapplied drawing scale, a page cap) is reported
