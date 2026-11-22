@@ -15,6 +15,9 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from src.measure.dimensions import find_dimensions
+from src.measure.scale import scale_spans
+
 CATEGORY_KEYWORDS = {
     "walls": re.compile(r"\bwalls?\b", re.IGNORECASE),
     "doors": re.compile(r"\bdoors?\b", re.IGNORECASE),
@@ -35,9 +38,12 @@ _NUMBER_WORDS = {
     )
 }
 
+SQM_TO_SQFT = 10.7639
+
 _UNIT_PATTERNS = [
     # order matters: area must be tried before length ("sq ft" before "ft")
     ("area", r"sq\.?\s*ft\.?|sqft|sf\b|sq\.?\s*feet|square\s+f(?:ee|oo)t"),
+    ("area_m", r"m2\b|m²|sq\.?\s*m\b|square\s+met(?:er|re)s?"),
     (
         "length",
         r"linear\s+f(?:ee|oo)t|lin\.?\s*ft\.?|l\.?f\.?\b|feet\b|foot\b|ft\b\.?|'",
@@ -60,6 +66,51 @@ _NUMBER_TOKEN_RE = re.compile(
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+(?=[A-Z0-9])|\n\s*\n|\n\s*[•●▪*-]\s+")
 
 
+_CONTINUES = re.compile(
+    r"(?:[,;:\-–(]|\b(?:and|or|of|to|for|the|with|at|in|on|a|an|per|by|across|"
+    r"along|between|from|into|throughout|each|about|approximately|total))\s*$",
+    re.IGNORECASE,
+)
+_BOUNDARY_START = re.compile(r"[A-Z•●▪*-]|\d+[.)]\s")
+
+
+def _blank_scales(text: str) -> str:
+    """Blank out scale notes (SCALE 1/4" = 1'-0", 1:50): they are not quantities."""
+    chars = list(text)
+    for start, end in scale_spans(text):
+        for i in range(start, end):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _join_lines(text: str) -> str:
+    """Re-flow line breaks: a wrapped sentence is joined, a new statement is split.
+
+    PDF text and OCR both arrive one visual line per row, and drawing labels
+    ("SCALE 1/4"=1'-0"", "CORRIDOR 12'-6" x 8'-0"") have no full stop. A line
+    that starts a new capitalised statement (or bullet) begins a new sentence
+    unless the previous line clearly continues (ends in a comma, hyphen or a
+    connecting word such as "of", "and", "across").
+    """
+    out: List[str] = []
+    previous = ""
+    for line in text.replace("\r", "").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            out.append("\n\n")
+            previous = ""
+            continue
+        if previous:
+            new_statement = _BOUNDARY_START.match(stripped) and not _CONTINUES.search(
+                previous
+            )
+            out.append("\n\n" if new_statement else " ")
+        out.append(stripped)
+        previous = stripped
+    return "".join(out)
+
+
 @dataclass(frozen=True)
 class Candidate:
     value: float
@@ -76,7 +127,15 @@ class TextMatch:
 
 def _candidates(sentence: str) -> List[Candidate]:
     found = []
+    # Dimension strings (12'-6", 30 ft, 3.6 m, 8-inch) are parsed first so their
+    # digits are never re-read as counts; inch dimensions are never quantities.
+    dims = find_dimensions(sentence)
+    for dim in dims:
+        unit_class = "dimension" if dim.kind == "inch" else "length"
+        found.append(Candidate(dim.feet, unit_class, dim.start, dim.end))
     for m in _NUMBER_TOKEN_RE.finditer(sentence):
+        if any(d.start <= m.start() < d.end for d in dims):
+            continue
         if m.group("word"):
             value = float(_NUMBER_WORDS[m.group("word").lower()])
         else:
@@ -96,8 +155,10 @@ def _candidates(sentence: str) -> List[Candidate]:
         if unit is not None:
             unit_class = unit.lastgroup
             end = unit.end()
+            if unit_class == "area_m":
+                unit_class, value = "area", value * SQM_TO_SQFT
         found.append(Candidate(value, unit_class, m.start(), end))
-    return found
+    return sorted(found, key=lambda c: c.start)
 
 
 def extract_matches(text: str) -> Dict[str, TextMatch]:
@@ -107,8 +168,7 @@ def extract_matches(text: str) -> Dict[str, TextMatch]:
     the *nearest* number whose unit class fits that category.
     """
     found: Dict[str, TextMatch] = {}
-    normalised = text.replace("\r", "")
-    for raw_sentence in _SENTENCE_SPLIT_RE.split(normalised):
+    for raw_sentence in _SENTENCE_SPLIT_RE.split(_join_lines(_blank_scales(text))):
         sentence = re.sub(r"\s+", " ", raw_sentence).strip()
         if not sentence:
             continue
@@ -127,7 +187,7 @@ def extract_matches(text: str) -> Dict[str, TextMatch]:
                     if distance < best_distance:
                         best, best_distance = cand, distance
             if best is not None:
-                found[category] = TextMatch(best.value, sentence[:160])
+                found[category] = TextMatch(round(best.value, 4), sentence[:160])
     return found
 
 

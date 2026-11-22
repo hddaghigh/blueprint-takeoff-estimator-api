@@ -50,8 +50,9 @@ async def test_photo_takeoff_parses_real_jpeg(client, sample_photo_path):
     assert body["metadata"]["image_width"] == 1280
     assert body["metadata"]["image_height"] == 853
     assert body["metadata"]["average_luminance"] > 0
-    assert body["items"][0]["category"] == "flooring"
-    assert body["items"][0]["quantity"] > 0
+    # No quantity may be invented from pixel counts (the old pixels/500 "sq ft").
+    assert body["items"] == []
+    assert body["metadata"]["pixel_count"] == 1280 * 853
 
 
 @pytest.mark.asyncio

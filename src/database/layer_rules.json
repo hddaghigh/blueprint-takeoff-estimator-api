@@ -1,0 +1,16 @@
+{
+    "_comment": "Case-insensitive fnmatch patterns that map CAD layer / block names to takeoff categories. Edit to match your office's CAD standard (e.g. AIA/NCS: A-WALL, A-DOOR, A-FLOR).",
+    "walls": {
+        "layers": ["*WALL*"],
+        "exclude_layers": ["*DIM*", "*TEXT*", "*ANNO*", "*HATCH*", "*PATT*", "*TAG*", "*IDEN*"]
+    },
+    "doors": {
+        "layers": ["*DOOR*"],
+        "exclude_layers": ["*DIM*", "*TEXT*", "*ANNO*", "*TAG*", "*IDEN*"],
+        "blocks": ["*DOOR*", "DR-*", "DR_*"]
+    },
+    "flooring": {
+        "layers": ["*FLOR*", "*FLOOR*", "*FINISH*"],
+        "exclude_layers": ["*DIM*", "*TEXT*", "*ANNO*", "*TAG*", "*IDEN*", "*PATT*"]
+    }
+}

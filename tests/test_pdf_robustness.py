@@ -107,7 +107,7 @@ async def test_callout_on_late_page_is_found(client, make_pdf):
 
 @pytest.mark.asyncio
 async def test_page_cap_is_reported_not_silent(client, make_pdf, monkeypatch):
-    monkeypatch.setattr("src.routes.takeoffs.MAX_PDF_PAGES", 5)
+    monkeypatch.setattr("src.config.MAX_PDF_PAGES", 5)
 
     def draw(c, page):
         c.drawString(72, 700, "Install 4 doors." if page == 6 else f"Notes {page}")

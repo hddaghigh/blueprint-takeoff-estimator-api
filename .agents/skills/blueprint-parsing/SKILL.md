@@ -2,56 +2,70 @@
 
 ## Purpose
 
-Rules for any agent that reads, extends, or debugs the multi-modal takeoff
-pipelines in `src/routes/takeoffs.py` (text, photo, drawing-pdf).
+Rules for any agent that reads, extends, or debugs the takeoff pipelines
+(`src/pipelines.py`, `src/pdf_scan.py`, `src/cad.py`, and the routes in
+`src/routes/`) for text, photos, PDF drawings and DXF/DWG drawings.
 
 ## Task rules
 
-1. **Read before you infer.** Every pipeline must open and actually parse the
-   real input (text stream, decoded image pixel matrix, or pdfplumber page
-   objects). Never return a takeoff item that wasn't computed from bytes that
-   were actually read from the uploaded/bundled file.
+1. **Read before you infer.** Every item must come from something actually read
+   from the input: text (layer or OCR), a schedule table, scaled geometry, CAD
+   entities, or an opt-in vision reading. Never return a quantity from page size,
+   pixel counts or shape counts alone.
 
-2. **Category vocabulary is fixed and lives in one place.** The only valid
-   takeoff categories are the keys of `src/database/ddc_cwicr.json`
-   (`walls`, `doors`, `flooring`). If a pipeline needs a new category, add the
-   CWICR row to that file first — do not invent a category string in a router
-   that has no matching rate entry.
+2. **Provenance on every item.** Each `Finding` carries `basis`
+   (`text|schedule|geometry|cad|vision`), `confidence` (`high|medium|low`) and
+   `evidence`. Defaults: text layer/schedule/CAD = high; OCR text = medium (low
+   when mean OCR confidence < 75); scaled wall pairing = medium; door-swing and
+   room-area geometry = low; vision = low. Anything not `high` is listed in
+   `review_reasons`, and the estimate endpoint flags it again.
 
-3. **Text extraction is sentence-scoped and unit-aware.**
-   `src/extraction.py::extract_matches` splits on sentence boundaries and,
-   inside a sentence, pairs each keyword with the nearest number whose unit
-   fits the category (walls = length, flooring = area, doors = count).
+3. **Category vocabulary is fixed and lives in one place.** The valid categories
+   are the keys of `src/database/ddc_cwicr.json` (`walls`, `doors`, `flooring`).
+   Add the CWICR row (with a real price) before using a new category anywhere,
+   including the vision schema (built from those keys) and CAD layer rules.
+
+4. **Text extraction is sentence-scoped and unit-aware.**
+   `src/extraction.py::extract_matches` pairs each keyword with the nearest
+   number whose unit fits the category (walls = length, flooring = area,
+   doors = count) and converts feet-inches/metric via `src/measure/dimensions.py`.
    Dimensions ("8-inch", 3'-0") and part codes ("08-1100-0045") are never
-   quantities. Reuse it from both the text and PDF pipelines rather than
-   writing a second scanner, and add a case to `tests/test_extraction.py`
-   for any new phrasing you support.
+   quantities. Reuse it everywhere; add a case to `tests/test_extraction.py`
+   for any new phrasing. Line breaks are re-flowed by `_join_lines`: a new
+   capitalised line is a new statement, and scale notes are blanked out so the
+   `1'-0"` in `SCALE 1/4" = 1'-0"` is never read as a wall.
+   OCR text is first repaired by `src/ocr/normalize.py::unglue` (missing spaces,
+   e.g. `4doors and120linear`); it splits only runs made entirely of
+   construction vocabulary, so part codes and dimensions are untouched. OCR
+   merges overlapping detections keeping the LONGEST text, because engines
+   sometimes clip a line's tail.
 
-4. **PDF takeoff items come only from text callouts.** Shape counts and page
-   size have no reliable meaning (rect count != doors, sheet area != floor
-   area), so they must never become takeoff items. Vector lengths/counts and
-   embedded-image counts are reported in `metadata` for reference, as
-   paper-space at 1:1 (864 PDF points = 1 ft; no drawing scale applied).
-   Anything that limits the result (page cap, scanned/image-only pages,
-   skipped pages, no matching callout) must appear in `metadata.warnings`,
-   never be dropped silently. OCR is not supported.
+5. **Priority when sources disagree:** door schedule > text callout (text layer,
+   then OCR) > geometry > vision for PDFs; CAD geometry > drawing notes for CAD.
+   A disagreement is a warning plus a review reason, never a silent override.
 
-5. **Heuristic constants must be named, documented, and surfaced in
-   `metadata`.** The photo pipeline's pixel-to-square-foot calibration
-   (`PHOTO_PIXELS_PER_SQFT`) is a placeholder MVP heuristic, not a measured
-   camera calibration. Any pipeline that uses a similar heuristic must:
-   - define it as a named module-level constant with a comment explaining it,
-   - include a `note` field in the response `metadata` saying so.
-   This keeps heuristic estimates from being silently presented as
-   ground-truth measurements downstream in the estimate engine.
+6. **Scale is explicit or absent.** Geometry becomes real-world length/area only
+   with exactly one scale note on the same page (`src/measure/scale.py`).
+   Several scales, "not to scale", or none means paper-space only (864 PDF points
+   = 1 ft) and no geometry items. Never borrow a scale from another page.
 
-6. **Large files must not block the event loop.** PDFs are scanned in a
-   worker thread with a hard page cap (`MAX_PDF_PAGES`, reported in
-   `metadata.warnings` when hit); if you raise or remove that cap, add a
-   timing regression test.
+7. **Limits are reported, never silent.** Page cap, unread/scanned pages, no OCR
+   engine, OCR failures, low OCR confidence, skipped pages, ambiguous scale and
+   failed vision calls all go in `metadata.warnings`. OCR and vision must never
+   raise: a missing or failing engine degrades to a warning.
 
-7. **Every pipeline change needs a real-asset test.** Add or update a test in
-   `tests/test_takeoffs.py` that uploads the actual file under `assets/`
-   (or a new real fixture asset committed the same way, via
-   `bootstrap_assets.py`) — not a synthetic/mocked payload — through
-   `multipart/form-data`.
+8. **Vision is opt-in and private by construction.** It runs only when the request
+   sets `use_vision=true` (it sends the image to Anthropic). Use structured
+   outputs (`output_config.format`), never forced `tool_choice` (rejected by
+   claude-sonnet-5-5), keep refusal fallbacks on, and only fill categories no
+   other source found.
+
+9. **Heavy work stays off the event loop.** PDF/photo/CAD processing runs in a
+   worker thread; long documents go through `/api/v1/jobs/takeoffs`. Caps live in
+   `src/config.py` and are read at call time so tests can patch them.
+
+10. **Every change needs a real-file test that can fail.** Upload generated
+    ground-truth PDFs (reportlab) or DXFs (ezdxf), or the real assets, via
+    `multipart/form-data`. Replace OCR/Claude only at their own boundary
+    (`ocr.engine.set_engine`, `vision.claude.set_client`). After adding logic,
+    mutate one constant and confirm a test fails. Run `python -m scripts.benchmark`.

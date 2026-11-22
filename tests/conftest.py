@@ -17,6 +17,22 @@ async def client():
         yield ac
 
 
+@pytest.fixture(autouse=True)
+def no_ocr_engine_by_default():
+    """Tests are deterministic whether or not Tesseract is installed.
+
+    OCR tests inject an engine explicitly with `set_engine(...)`.
+    """
+    from src.ocr import engine
+    from src.vision import claude
+
+    engine.set_engine(None)
+    claude.set_client(None)  # tests must never reach the network by accident
+    yield
+    engine.set_engine(None, enabled=False)
+    claude.set_client(None, enabled=False)
+
+
 @pytest.fixture(scope="session")
 def scope_txt_path():
     assert SCOPE_TXT_PATH.exists(), "run bootstrap_assets.py before the test suite"

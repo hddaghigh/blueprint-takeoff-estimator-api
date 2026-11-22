@@ -9,3 +9,7 @@ pytest-asyncio
 httpx
 requests
 python-multipart
+rapidocr-onnxruntime
+pytesseract
+ezdxf
+anthropic
