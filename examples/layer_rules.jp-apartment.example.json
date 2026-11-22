@@ -1,0 +1,21 @@
+{
+    "_comment": "Rules for a Japanese-standard apartment-building drawing (layers like 1F-F_FINI1-100, door blocks SD-/SUD-/AD-, room schedule in ROOM block attributes). Layer meanings were inferred from the drawing's geometry, not from a published standard: F_FINI = wall/room finish outlines (drawn as double lines, use wall_representation=double_line); F_FITT1 = fittings (AW- windows are NOT doors); ROOM blocks carry [id, name, area m2, finishes...]. Use with include_blocks=1F-BLOCK_100 to read one floor at the 1:100 scale only.",
+    "walls": {
+        "layers": ["*F_FINI*"],
+        "exclude_layers": ["*DIM*", "*TEXT*", "*GRID*", "*HIDE*", "*LAY*"]
+    },
+    "doors": {
+        "layers": [],
+        "blocks": ["SD-*", "SUD-*", "AD-*"]
+    },
+    "flooring": {
+        "layers": []
+    },
+    "rooms": {
+        "blocks": ["ROOM"],
+        "id_index": 0,
+        "name_index": 1,
+        "area_index": 2,
+        "area_unit": "m2"
+    }
+}

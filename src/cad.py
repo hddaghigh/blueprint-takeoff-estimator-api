@@ -15,8 +15,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
+import re
+from collections import Counter
 from typing import Dict, List, Optional
 
 import ezdxf
@@ -64,6 +67,22 @@ def _load_rules(path: str) -> dict:
                     status_code=500,
                     detail=f"Layer rules file '{path}': '{category}' needs a '{key}' list",
                 )
+    rooms = rules.get("rooms")
+    if rooms is not None:
+        ok = isinstance(rooms, dict) and isinstance(rooms.get("blocks"), list)
+        ok = ok and isinstance(rooms.get("area_index"), int)
+        ok = ok and all(
+            isinstance(rooms.get(k, 0), int) for k in ("id_index", "name_index")
+        )
+        ok = ok and rooms.get("area_unit", "m2") in ("m2", "sqft")
+        if not ok:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Layer rules file '{path}': 'rooms' needs a 'blocks' list, an integer "
+                    "'area_index' (optional id_index/name_index) and area_unit m2|sqft"
+                ),
+            )
     return rules
 
 
@@ -280,7 +299,42 @@ def _is_xref(doc, name: str) -> bool:
         return False
 
 
-def _walk(entities, doc, stats, rule, depth=0, parent_layer=None, stack=()):
+_CAD_UNICODE = re.compile(re.escape(chr(92) + "U+") + "([0-9A-Fa-f]{4})")
+SQM_TO_SQFT = 10.7639
+
+
+def _decode_cad_text(text: str) -> str:
+    """CAD files store non-ASCII text as backslash-U+XXXX escapes; decode them."""
+    return _CAD_UNICODE.sub(lambda m: chr(int(m.group(1), 16)), text or "")
+
+
+def _parse_area(text: str) -> Optional[float]:
+    """A schedule area such as '168.3' (or full-width digits); None for '-' or blanks."""
+    try:
+        value = float(unicodedata.normalize("NFKC", text).strip().replace(",", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _room_from_attribs(entity, rule: dict) -> dict:
+    values = [_decode_cad_text(a.dxf.text) for a in entity.attribs]
+
+    def at(key: str):
+        index = rule.get(key)
+        ok = isinstance(index, int) and index < len(values)
+        return values[index].strip() if ok else ""
+
+    return {
+        "id": at("id_index"),
+        "name": at("name_index"),
+        "area": _parse_area(at("area_index")),
+    }
+
+
+def _walk(
+    entities, doc, stats, rule, room_blocks=(), depth=0, parent_layer=None, stack=()
+):
     """Yield (kind, entity, effective_layer, count) for every drawable entity.
 
     Nested blocks are expanded (with their scale/rotation applied) and block
@@ -301,6 +355,9 @@ def _walk(entities, doc, stats, rule, depth=0, parent_layer=None, stack=()):
             continue
         name = e.dxf.name
         cells = max(1, e.dxf.get("column_count", 1)) * max(1, e.dxf.get("row_count", 1))
+        if room_blocks and not name.startswith("*") and _matches(name, room_blocks):
+            yield "ROOM_BLOCK", e, layer, 1
+            continue
         if _is_door_insert(name, layer, rule):
             yield "DOOR_BLOCK", e, layer, cells
             continue
@@ -320,6 +377,7 @@ def _walk(entities, doc, stats, rule, depth=0, parent_layer=None, stack=()):
                 doc,
                 stats,
                 rule,
+                room_blocks,
                 depth + 1,
                 layer,
                 stack + (name,),
@@ -359,6 +417,7 @@ def process_cad(
     source: str,
     units: Optional[str] = None,
     wall_representation: str = "centerline",
+    include_blocks: Optional[str] = None,
 ) -> TakeoffResponse:
     if wall_representation not in ("centerline", "double_line"):
         raise HTTPException(
@@ -370,6 +429,21 @@ def process_cad(
     ft = _feet_per_unit(doc, units)
     msp = doc.modelspace()
     warnings: List[str] = []
+    include = [p.strip() for p in (include_blocks or "").split(",") if p.strip()]
+    top_blocks = Counter(e.dxf.name for e in msp if e.dxftype() == "INSERT")
+    entities = msp
+    if include:
+        entities = [
+            e for e in msp if e.dxftype() == "INSERT" and _matches(e.dxf.name, include)
+        ]
+        if not entities:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"include_blocks {include} matched no top-level block. "
+                    f"Available: {sorted(top_blocks)[:40]}"
+                ),
+            )
     counts = {"wall_entities": 0, "door_blocks": 0, "door_arcs": 0, "floor_shapes": 0}
 
     # ---- walls
@@ -383,12 +457,28 @@ def process_cad(
     layers_seen = set()
 
     wr, dr, fr = rules["walls"], rules["doors"], rules["flooring"]
+    room_rule = rules.get("rooms") or {}
+    rooms_by_key: Dict[str, dict] = {}
+    duplicate_rooms: List[str] = []
+    rooms_no_area: List[str] = []
     stats = _WalkStats()
-    for kind, e, layer, cells in _walk(msp, doc, stats, dr):
+    for kind, e, layer, cells in _walk(
+        entities, doc, stats, dr, tuple(room_rule.get("blocks", ()))
+    ):
         layers_seen.add(layer)
         try:
             if kind in TEXT_KINDS:
-                notes.append(e.dxf.text if kind == "TEXT" else e.plain_text())
+                raw_text = e.dxf.text if kind == "TEXT" else e.plain_text()
+                notes.append(_decode_cad_text(raw_text))
+            elif kind == "ROOM_BLOCK":
+                room = _room_from_attribs(e, room_rule)
+                key = room["id"] or f"{room['name']}|{room['area']}"
+                if room["area"] is None:
+                    rooms_no_area.append(room["name"] or room["id"] or "?")
+                elif key in rooms_by_key:
+                    duplicate_rooms.append(key)
+                else:
+                    rooms_by_key[key] = room
             elif kind == "DOOR_BLOCK":
                 door_blocks += cells
             elif _matches(layer, wr["layers"], wr.get("exclude_layers")):
@@ -522,6 +612,44 @@ def process_cad(
             f"{counts['floor_shapes']} closed shape(s) / hatch(es) on floor layers",
         )
 
+    if rooms_by_key:
+        unit_label = room_rule.get("area_unit", "m2")
+        to_sqft = SQM_TO_SQFT if unit_label == "m2" else 1.0
+        total = sum(r["area"] for r in rooms_by_key.values()) * to_sqft
+        listing = "; ".join(
+            f"{r['name'] or r['id']} {r['area']:g}" for r in rooms_by_key.values()
+        )
+        existing = findings.get("flooring")
+        if existing is None:
+            findings["flooring"] = Finding(
+                "flooring",
+                total,
+                "schedule",
+                "medium",
+                f"Room schedule ({len(rooms_by_key)} rooms, {unit_label}): {listing}"[
+                    :400
+                ],
+            )
+            warnings.append(
+                "Flooring is the sum of every scheduled room area (including e.g. parking "
+                "or service rooms); confirm the floor finish matches the priced finish"
+            )
+            review.append("flooring from room schedule")
+        elif abs(existing.quantity - total) > 0.02 * max(existing.quantity, 1):
+            warnings.append(
+                f"flooring: room schedule ({total:.0f} sq ft) differs from CAD shapes "
+                f"({existing.quantity:.0f} sq ft); using the CAD shapes"
+            )
+    if duplicate_rooms:
+        warnings.append(
+            f"{len(duplicate_rooms)} repeated room label(s) ignored (same room id drawn "
+            f"more than once): {sorted(set(duplicate_rooms))}"
+        )
+    if rooms_no_area:
+        warnings.append(
+            f"Room(s) without a numeric area were not counted: {rooms_no_area}"
+        )
+
     for category, match in extract_matches("\n".join(notes)).items():
         note = Finding(
             category, match.quantity, "text", "high", "Drawing note: " + match.snippet
@@ -543,6 +671,14 @@ def process_cad(
     review += [w for w in warnings if "differs" in w or "Skipped" in w]
     metadata = {
         "paper_layouts": paper,
+        "include_blocks": include,
+        "top_level_blocks": [
+            {"name": n, "count": c} for n, c in sorted(top_blocks.items())
+        ][:60],
+        "rooms": [
+            {"id": r["id"], "name": r["name"], "area": r["area"]}
+            for r in rooms_by_key.values()
+        ],
         "hidden_entities_ignored": stats.hidden,
         "blocks_expanded": stats.expanded,
         "units": dxf_units.decode(doc.units) if not units else units,

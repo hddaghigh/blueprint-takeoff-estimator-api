@@ -60,7 +60,7 @@ src/
                    repair), preprocess.py (deskew/binarize), rasterize.py
   vision/          claude.py (opt-in Anthropic vision)
   database/        ddc_cwicr.json (rates), layer_rules.json (CAD, LAYER_RULES_FILE), loader.py
-examples/          layer_rules.german.example.json
+examples/          layer_rules.german.example.json, layer_rules.jp-apartment.example.json
   routes/          takeoffs.py, estimates.py, jobs.py
 tests/             pytest + httpx.AsyncClient, ground-truth PDFs/DXFs
 scripts/           benchmark.py

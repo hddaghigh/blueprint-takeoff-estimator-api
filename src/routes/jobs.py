@@ -15,6 +15,7 @@ async def submit_takeoff_job(
     file: UploadFile = File(...),
     units: Optional[str] = Form(default=None),
     wall_representation: str = Form(default="centerline"),
+    include_blocks: Optional[str] = Form(default=None),
     use_vision: bool = Form(default=False),
 ) -> Dict[str, Any]:
     """Queue a takeoff for any supported file type; returns a job id at once.
@@ -26,7 +27,13 @@ async def submit_takeoff_job(
     name = file.filename or "upload"
     kind = pipelines.detect_kind(raw, name)
     job_id = jobs.submit(
-        pipelines.run_takeoff, raw, name, units, wall_representation, use_vision
+        pipelines.run_takeoff,
+        raw,
+        name,
+        units,
+        wall_representation,
+        use_vision,
+        include_blocks,
     )
     return {"job_id": job_id, "status": "queued", "kind": kind}
 

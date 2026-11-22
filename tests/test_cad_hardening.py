@@ -462,3 +462,182 @@ async def test_truncated_or_garbage_dxf_is_422_never_500(client, content):
 
     assert response.status_code == 422
     assert "DXF" in response.json()["detail"]
+
+
+# ------------------------------------------------ multi-floor drawings + room schedule
+RULES = "examples/layer_rules.jp-apartment.example.json"
+
+
+def building_doc():
+    """Two floors, each drawn at 1:100 and again at 1:50 as top-level blocks, with a
+    room schedule held in ROOM block attributes (area in m2), one room labelled twice.
+    """
+    doc = ezdxf.new("R2018")
+    doc.units = units.MM
+    doc.layers.add("1F-F_FINI1-100")
+    doc.layers.add("2F-F_FINI1-100")
+    doc.layers.add("1F-F_FITT1-100")
+    room = doc.blocks.new("ROOM")
+    for tag in ("ID", "NAME", "AREA"):
+        room.add_attdef(tag, (0, 0))
+    doc.blocks.new("SD-A01_100").add_line((0, 0), (900, 0))
+    doc.blocks.new("AW-A01_100").add_line((0, 0), (1800, 0))  # a window: not a door
+    for floor, wall_mm, doors in (("1F", 10000, 2), ("2F", 3000, 1)):
+        for scale in ("100", "50"):
+            blk = doc.blocks.new(f"{floor}-BLOCK_{scale}")
+            blk.add_line(
+                (0, 0), (wall_mm, 0), dxfattribs={"layer": f"{floor}-F_FINI1-100"}
+            )
+            blk.add_line(
+                (0, 200), (wall_mm, 200), dxfattribs={"layer": f"{floor}-F_FINI1-100"}
+            )
+            for i in range(doors):
+                blk.add_blockref(
+                    "SD-A01_100",
+                    (500 + i * 2000, 0),
+                    dxfattribs={"layer": f"{floor}-F_FITT1-100"},
+                )
+            blk.add_blockref(
+                "AW-A01_100", (100, 0), dxfattribs={"layer": f"{floor}-F_FITT1-100"}
+            )
+            if floor == "1F":
+                for rid, name, area in (
+                    ("1F_1", "Hall", "10.0"),
+                    ("1F_2", "Store", "5.5"),
+                    ("1F_2", "Store", "5.5"),
+                    ("1F_3", "Lobby", "-"),
+                ):
+                    ref = blk.add_blockref("ROOM", (0, 1000))
+                    ref.add_attrib("ID", rid)
+                    ref.add_attrib("NAME", name)
+                    ref.add_attrib("AREA", area)
+    msp = doc.modelspace()
+    for floor in ("1F", "2F"):
+        for scale in ("100", "50"):
+            x = (
+                0 if floor == "1F" else 100000
+            )  # floors and scales sit side by side, as in real sheets
+            y = 0 if scale == "100" else -50000
+            msp.add_blockref(f"{floor}-BLOCK_{scale}", (x, y))
+    return doc
+
+
+async def run_with_rules(client, doc, tmp_path, monkeypatch, **form):
+    monkeypatch.setenv("LAYER_RULES_FILE", RULES)
+    return await run(client, doc, tmp_path, wall_representation="double_line", **form)
+
+
+@pytest.mark.asyncio
+async def test_include_blocks_reads_one_floor_at_one_scale(
+    client, tmp_path, monkeypatch
+):
+    doc = building_doc()
+
+    one = await run_with_rules(
+        client, doc, tmp_path, monkeypatch, include_blocks="1F-BLOCK_100"
+    )
+    every = await run_with_rules(client, doc, tmp_path, monkeypatch)
+
+    # 10 m of wall = 32.81 ft; 2 doors; the AW window block is not a door
+    assert item(one, "walls")["quantity"] == pytest.approx(10000 / 304.8, abs=0.05)
+    assert item(one, "doors")["quantity"] == 2.0
+    # without a selection both floors AND both scales are counted: 2*(10+3) m, 2*(2+1) doors
+    assert item(every, "walls")["quantity"] == pytest.approx(26000 / 304.8, abs=0.1)
+    assert item(every, "doors")["quantity"] == 6.0
+    names = {b["name"] for b in one["metadata"]["top_level_blocks"]}
+    assert {"1F-BLOCK_100", "1F-BLOCK_50", "2F-BLOCK_100", "2F-BLOCK_50"} <= names
+    assert one["metadata"]["include_blocks"] == ["1F-BLOCK_100"]
+
+
+@pytest.mark.asyncio
+async def test_include_blocks_accepts_globs_and_lists(client, tmp_path, monkeypatch):
+    body = await run_with_rules(
+        client,
+        building_doc(),
+        tmp_path,
+        monkeypatch,
+        include_blocks="1F-*_100, 2F-*_100",
+    )
+
+    assert item(body, "doors")["quantity"] == 3.0  # 2 on 1F + 1 on 2F, 1:100 only
+
+
+@pytest.mark.asyncio
+async def test_unknown_block_selection_lists_what_is_available(
+    client, tmp_path, monkeypatch
+):
+    path = tmp_path / "plan.dxf"
+    building_doc().saveas(path)
+    monkeypatch.setenv("LAYER_RULES_FILE", RULES)
+    with open(path, "rb") as fh:
+        response = await client.post(
+            URL,
+            files={"file": ("plan.dxf", fh, "application/dxf")},
+            data={"include_blocks": "9F-*"},
+        )
+
+    assert response.status_code == 422
+    assert "1F-BLOCK_100" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_room_schedule_gives_flooring_without_duplicates(
+    client, tmp_path, monkeypatch
+):
+    body = await run_with_rules(
+        client, building_doc(), tmp_path, monkeypatch, include_blocks="1F-BLOCK_100"
+    )
+
+    flooring = item(body, "flooring")
+    assert flooring["quantity"] == pytest.approx(
+        (10.0 + 5.5) * 10.7639, abs=0.01
+    )  # Store counted once
+    assert (flooring["basis"], flooring["confidence"]) == ("schedule", "medium")
+    meta = body["metadata"]
+    assert [r["id"] for r in meta["rooms"]] == ["1F_1", "1F_2"]
+    warnings = " ".join(meta["warnings"])
+    assert "repeated room label" in warnings and "1F_2" in warnings
+    assert "without a numeric area" in warnings and "Lobby" in warnings
+    assert (
+        "flooring from room schedule" in str(meta["warnings"]) or meta["needs_review"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_rooms_rule_no_flooring_is_invented(client, tmp_path):
+    body = await run(client, building_doc(), tmp_path, include_blocks="1F-BLOCK_100")
+
+    assert item(body, "flooring") is None
+    assert body["metadata"]["rooms"] == []
+
+
+@pytest.mark.asyncio
+async def test_bad_rooms_rule_is_a_clear_error(client, tmp_path, monkeypatch):
+    bad = tmp_path / "rules.json"
+    bad.write_text(
+        '{"walls": {"layers": []}, "doors": {"layers": [], "blocks": []}, '
+        '"flooring": {"layers": []}, "rooms": {"blocks": ["ROOM"]}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAYER_RULES_FILE", str(bad))
+
+    response = await client.post(
+        URL, files={"file": ("p.dxf", b"0\nSECTION\n", "application/dxf")}
+    )
+
+    assert response.status_code == 500 and "rooms" in response.json()["detail"]
+
+
+def test_cad_unicode_escapes_are_decoded():
+    from src.cad import _decode_cad_text, _parse_area
+
+    bs = chr(92)  # CAD stores non-ASCII text as <backslash>U+XXXX
+    assert _decode_cad_text(f"{bs}U+99D0{bs}U+8ECA{bs}U+5834") == "駐車場"
+    assert _decode_cad_text("plain") == "plain"
+    assert _parse_area("168.3") == 168.3
+    assert _parse_area("１２．５") == 12.5  # full-width digits
+    assert (
+        _parse_area("-") is None
+        and _parse_area("") is None
+        and _parse_area("0") is None
+    )

@@ -121,6 +121,7 @@ async def estimate_from_document(
     tax_rate: float = Form(default=0.0),
     units: Optional[str] = Form(default=None),
     wall_representation: str = Form(default="centerline"),
+    include_blocks: Optional[str] = Form(default=None),
     use_vision: bool = Form(default=False),
 ) -> DocumentEstimateResponse:
     """Upload a document and get takeoff + priced estimate in one call.
@@ -132,7 +133,13 @@ async def estimate_from_document(
     raw = await pipelines.read_upload(file)
     name = file.filename or "upload"
     takeoff: TakeoffResponse = await run_in_threadpool(
-        pipelines.run_takeoff, raw, name, units, wall_representation, use_vision
+        pipelines.run_takeoff,
+        raw,
+        name,
+        units,
+        wall_representation,
+        use_vision,
+        include_blocks,
     )
 
     review = list(takeoff.metadata.get("review_reasons", []))

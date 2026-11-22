@@ -69,6 +69,7 @@ def run_takeoff(
     units: Optional[str] = None,
     wall_representation: str = "centerline",
     use_vision: bool = False,
+    include_blocks: Optional[str] = None,
 ) -> TakeoffResponse:
     """Detect the file type and run the matching pipeline (blocking)."""
     from src import cad  # local import: cad pulls in ezdxf
@@ -79,7 +80,7 @@ def run_takeoff(
     if kind == "photo":
         return process_photo(raw, name, use_vision)
     if kind == "cad":
-        return cad.process_cad(raw, name, units, wall_representation)
+        return cad.process_cad(raw, name, units, wall_representation, include_blocks)
     return process_text(raw, name)
 
 

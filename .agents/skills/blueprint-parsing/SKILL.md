@@ -74,5 +74,10 @@ Rules for any agent that reads, extends, or debugs the takeoff pipelines
     arrays per cell, treat a door block as one unit (never expand it), let layer-0
     entities inherit the INSERT's layer, skip frozen/off/invisible entities, and
     report (never silently drop) xrefs, MLINE, paper-space viewports, depth/insert
-    caps. DWG is converted by a child process with a timeout; never import
+    caps. A multi-floor / multi-scale drawing must be read one top-level block at a
+    time (`include_blocks`), never summed. Room schedules (ROOM-block attributes)
+    are deduplicated by room id; schedule areas are `schedule`/`medium` and must
+    carry the warning that every scheduled room is included. Never infer what a
+    layer means from its name alone: render or measure it (line lengths, pairing,
+    extents) first. DWG is converted by a child process with a timeout; never import
     LibreDWG (GPLv3).

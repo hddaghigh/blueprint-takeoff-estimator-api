@@ -56,6 +56,7 @@ async def takeoff_from_cad(
     file: UploadFile = File(...),
     units: Optional[str] = Form(default=None),
     wall_representation: str = Form(default="centerline"),
+    include_blocks: Optional[str] = Form(default=None),
 ) -> TakeoffResponse:
     """Quantities from a DXF drawing (DWG via a configured converter).
 
@@ -63,10 +64,18 @@ async def takeoff_from_cad(
     (rules in src/database/layer_rules.json), converted to feet using the
     drawing's units. `units` (in|ft|mm|cm|m) is required for unitless drawings;
     `wall_representation` is `centerline` (default) or `double_line`.
+    `include_blocks` (comma-separated globs, e.g. `1F-BLOCK_100`) restricts the
+    read to those top-level blocks: use it to take off one floor of a drawing
+    that holds several (the response lists `top_level_blocks`).
     """
     raw = await pipelines.read_upload(file)
     return await run_in_threadpool(
-        cad.process_cad, raw, file.filename or "upload.dxf", units, wall_representation
+        cad.process_cad,
+        raw,
+        file.filename or "upload.dxf",
+        units,
+        wall_representation,
+        include_blocks,
     )
 
 
