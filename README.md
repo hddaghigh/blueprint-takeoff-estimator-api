@@ -9,9 +9,7 @@ number says **where it came from** (`basis`), **how far to trust it**
 page it could not read, an unapplied drawing scale, a page cap) is reported
 rather than hidden. The goal is a takeoff a person can check, not a black box.
 
-![Graphical abstract: inputs (scope text, PDF, scanned sheets and photos, DXF/DWG, optional vision) go through five processing steps (detect, read, understand, reconcile, price) to a quantity takeoff, a priced estimate and review flags](docs/graphical-abstract.png)
-
-<sub>Vector version for slides and print: [`docs/graphical-abstract.svg`](docs/graphical-abstract.svg)</sub>
+![Graphical abstract: inputs (scope text, PDF, scanned sheets and photos, DXF/DWG, optional vision) go through five processing steps (detect, read, understand, reconcile, price) to a quantity takeoff, a priced estimate and review flags](docs/graphical-abstract.svg)
 
 ```json
 {
